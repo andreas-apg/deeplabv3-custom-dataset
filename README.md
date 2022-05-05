@@ -18,7 +18,7 @@ Specify the model architecture with '--model ARCH_NAME' and set the output strid
 |deeplabv3_hrnetv2_32 | deeplabv3plus_hrnetv2_32 |
 
 ### 2. Making a Custom Dataset
-Modify the function get_labels in the custom.py in the Dataset directory, so that it returns the RGB colors of the segmentation mask annotations of your dataset. The encoder and decoder class methods `decode_target` and `encode_target` will handle the rest.
+Modify the function get_labels in the `custom.py` in the `datasets` directory, so that it returns the RGB colors of the segmentation mask annotations of your dataset. The encoder and decoder class methods `decode_target` and `encode_target` will handle the rest.
 
 Since this implementation uses PIL, do take care to save your segmentation masks as RGB if they were made using openCV with cv2.cvtColor and the argument cv2.COLOR_BGR2RGB.
 
