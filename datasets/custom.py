@@ -59,7 +59,7 @@ class CustomSegmentation(data.Dataset):
             index (int): Index
         Returns:
             tuple: (image, target) where target is the image segmentation.
-        """      
+        """
         img = Image.open(self.images[index]).convert('RGB')
         # A: portrait mode jpg images need to be transposed, because they are saved in landscape
         # and rotated by an exif tag  
@@ -70,8 +70,43 @@ class CustomSegmentation(data.Dataset):
         # A: the target has to be encoded after the transform is applied. Since the transform also
         # changes the target into a tensor (on top of resizing the image and whatnot), np.array is
         # needed to pass it into the encode function.
-        return img, self.encode_target(np.array(target))
-
+        result, flag = self.encode_target(np.array(target))
+        if not flag:
+            print(self.images[index])
+        return img, result 
+        
+#     def __getitem__(self, index):
+#         """
+#         Args:
+#             index (int): Index
+#         Returns:
+#             tuple: (image, target) where target is the image segmentation.
+#         """
+#         try:
+#             img = Image.open(self.images[index]).convert('RGB')
+#             # A: portrait mode jpg images need to be transposed, because they are saved in landscape
+#             # and rotated by an exif tag  
+#             img = ImageOps.exif_transpose(img)
+#             target = Image.open(self.masks[index])
+#             if self.transform is not None:
+#                 img, target = self.transform(img, target)
+#             # A: the target has to be encoded after the transform is applied. Since the transform also
+#             # changes the target into a tensor (on top of resizing the image and whatnot), np.array is
+#             # needed to pass it into the encode function.
+#             return img, self.encode_target(np.array(target))
+#         except Exception as e:
+#             print(e)
+#             print(self.images[index])
+#             print(self.masks[index])
+#             img = Image.open("/home/jovyan/work/deeplab/DeepLabV3Plus-Pytorch/datasets/dummy.png").convert('RGB')
+#             img = ImageOps.exif_transpose(img)
+#             target = Image.open("/home/jovyan/work/deeplab/DeepLabV3Plus-Pytorch/datasets/dummy.png")
+#             if self.transform is not None:
+#                 img, target = self.transform(img, target)
+#             # A: the target has to be encoded after the transform is applied. Since the transform also
+#             # changes the target into a tensor (on top of resizing the image and whatnot), np.array is
+#             # needed to pass it into the encode function.
+#             return img, self.encode_target(np.array(target))
 
     def __len__(self):
         return len(self.images)
@@ -79,13 +114,13 @@ class CustomSegmentation(data.Dataset):
     # A: Needed to encode the colors as (M, N) labels for the loss.
     # Since the loss can't be calculated with a tensor of shape 
     # [batch_size, height, width, channels] if the three channels are
-    # present, we need this to be able to encode the rgb class colors
+    # present, we need this to be able to encode the rgb class colorsself.images[index], 
     # into a single value to represent them.
     def get_labels():
         """Load the mapping that associates classes with label colors.
-           Our electrical substation dataset has 14 objects + background.
+           Our electrical substation dataset has 15 objects + background.
         Returns:
-            np.ndarray with dimensions (15, 3)
+            np.ndarray with dimensions (16, 3)
         """
         return np.asarray([ (0, 0, 0),       # Background
                             (162, 0, 255),   # Chave seccionadora lamina (Aberta)
@@ -101,8 +136,9 @@ class CustomSegmentation(data.Dataset):
                             (40, 0, 186),    # Religador
                             (255, 182, 0),   # Transformador
                             (138, 138, 0),   # Transformador de Corrente (TC)
-                            (162, 48, 0)]    # Transformador de Potencial (TP)
-                            )
+                            (162, 48, 0),    # Transformador de Potencial (TP)
+                            (162, 0, 96)     # Chave tripolar
+                          ])   
 
 
 #     @classmethod
@@ -136,6 +172,7 @@ class CustomSegmentation(data.Dataset):
     # A: in order for the mask to go through the loss function, the classes need to be
     # represented as a single value, opposed to three channels.
     @classmethod
+    # https://github.com/meetps/pytorch-semseg/blob/master/ptsemseg/loader/pascal_voc_loader.py
     def encode_target(self, mask):
         """Encode segmentation label images as classes
         Args:
@@ -145,9 +182,28 @@ class CustomSegmentation(data.Dataset):
             (np.ndarray): class map with dimensions (M,N), where the value at
             a given location is the integer denoting the class index.
         """
-        mask = mask.astype(int)
-        label_mask = np.zeros((mask.shape[0], mask.shape[1]), dtype=np.int16)
-        for i, label in enumerate(self.get_labels()):
-            label_mask[np.where(np.all(mask == label, axis=-1))[:2]] = i
-        label_mask = label_mask.astype(int)
-        return label_mask
+        try:
+            mask = mask.astype(int)
+            label_mask = np.zeros((mask.shape[0], mask.shape[1]), dtype=np.uint16)
+            for i, label in enumerate(self.get_labels()):
+                index = np.where(np.all(mask == label, axis=-1))[:2]
+                # A: if, for whatever reason, an index bigger than the mask shape is returned, it'll
+                # give an out of bounds error. I don't know why this happens, but sometimes, np.where
+                # does return some junk here. 
+                # Edit: apparently, those errors happens because a higher bit in the number is set
+                # by mistake, making a value that would be within 0... 639 to come out like 112589990684325.
+                # Bit masking that should help, perhaps? & 0xFFFF
+        
+                # A: treating indexes out of bounds
+                index = (index[0] & 0xFFFF, index[1] & 0xFFFF)
+                label_mask[index] = i
+            label_mask = label_mask.astype(int)
+            return label_mask, True
+        except Exception as e:
+            print(e)
+            print(f'Label {label} {i}')
+            #file = open("index.txt", "w")
+            #file.writelines(index)
+            #file.close()
+            print(mask.shape[0], mask.shape[1])
+            return np.zeros((mask.shape[0], mask.shape[1]), dtype=np.int16), False
