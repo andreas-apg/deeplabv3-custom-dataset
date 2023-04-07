@@ -107,7 +107,7 @@ class ExtRandomScale(object):
             PIL Image: Rescaled image.
             PIL Image: Rescaled label.
         """
-        assert img.size == lbl.size
+        assert img.size == lbl.size, f'Image size: {img.size}, Label size: {lbl.size}'
         scale = random.uniform(self.scale_range[0], self.scale_range[1])
         target_size = ( int(img.size[1]*scale), int(img.size[0]*scale) )
         return F.resize(img, target_size, self.interpolation), F.resize(lbl, target_size, Image.NEAREST)
