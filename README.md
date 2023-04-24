@@ -4,6 +4,16 @@ Modification of the [work](https://github.com/VainF/DeepLabV3Plus-Pytorch) by [G
 
 Some tinkering of their implementation of DeepLab with a custom dataset loader.
 
+### What I added:
+#### train.py
+- e-mail update functionality: It's now possible to receive updates of training progress using the gmail API. Edit mail.py to point to a .csv that has the sender and receiver infos. Be careful to not commit that info!
+- epoch functionality: the original implementation could only train over a number of iterations. I added the classic epoch approach instead, where the model goes over the entirety of the training set. At the moment, you still need to manually alter the --total_itrs parameter to account for that though. Calculate how many images your training set has and do the count. I might update that in the future to not need this anymore. The weights file was updated to accomodate for the new cur_epoch parameter.
+- updated resume training: I updated the weights file with new parameters to allow training to resume.
+- logging: instead of relying only on visdom, now the model will output a .txt file with the model statistics with the model name inside the /logs/ directory. If running --test_only, that will instead be inside /logs/test.
+
+#### predict.py
+- simple fix to check the exif_transpose flag in case an image wasn't natively rotated.
+
 ## Quick Start 
 
 ### 1. Available Architectures
