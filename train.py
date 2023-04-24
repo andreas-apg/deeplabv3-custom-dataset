@@ -22,6 +22,11 @@ import matplotlib.pyplot as plt
 import os
 import glob
 
+from mail import * # A: for email
+
+import sys
+import traceback
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -57,8 +62,8 @@ def get_argparser():
     parser.add_argument("--test_only", action='store_true', default=False)
     parser.add_argument("--save_val_results", action='store_true', default=False,
                         help="save segmentation results to \"./results\"")
-    parser.add_argument("--total_itrs", type=int, default=30e3,
-                        help="epoch number (default: 30k)")
+    parser.add_argument("--total_itrs", type=int, default=50e3,
+                        help="epoch number (default: 50k)")
     parser.add_argument("--lr", type=float, default=0.01,
                         help="learning rate (default: 0.01)")
     parser.add_argument("--lr_policy", type=str, default='poly', choices=['poly', 'step'],
@@ -106,6 +111,12 @@ def get_argparser():
                         help='env for visdom')
     parser.add_argument("--vis_num_samples", type=int, default=8,
                         help='number of samples for visualization (default: 8)')
+    parser.add_argument("--mail_subject", type=str,
+                        help='subject to be used on the emailed progress report')
+    parser.add_argument("--training_round", type=int,
+                        help='number of training round for simple does it')
+    parser.add_argument("--total_epochs", type=int, default=100,
+                        help="total epochs (default: 100)")
     return parser
 
 
@@ -177,9 +188,10 @@ def validate(opts, model, loader, device, metrics, ret_samples_ids=None):
                     target = loader.dataset.decode_target(target).astype(np.uint8)
                     pred = loader.dataset.decode_target(pred).astype(np.uint8)
 
-                    Image.fromarray(image).save('results/%d_image.png' % img_id)
+                    # A: uncomment later
+                    #Image.fromarray(image).save('results/%d_image.png' % img_id)
                     Image.fromarray(target).save('results/%d_target.png' % img_id)
-                    Image.fromarray(pred).save('results/%d_pred.png' % img_id)
+                    #Image.fromarray(pred).save('results/%d_pred.png' % img_id)
 
                     fig = plt.figure()
                     plt.imshow(image)
@@ -198,6 +210,15 @@ def validate(opts, model, loader, device, metrics, ret_samples_ids=None):
 
 def main():
     opts = get_argparser().parse_args()
+    first_val = False # A: this flag is to control the first validation for the mail
+    
+    # A: added this to keep logs instead of using Visdom vis
+    check_path = os.path.isdir("./logs/")
+    if not check_path:
+        os.makedirs("./logs/")
+        print("created folder : ", "./logs/")   
+    
+    mail_server = get_mail_server() # A: for email
 
     # Setup visualization
     vis = Visualizer(port=opts.vis_port,
@@ -261,6 +282,7 @@ def main():
         """
         torch.save({
             "cur_itrs": cur_itrs,
+            "cur_epochs": cur_epochs,
             "model_state": model.module.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "scheduler_state": scheduler.state_dict(),
@@ -283,6 +305,7 @@ def main():
             optimizer.load_state_dict(checkpoint["optimizer_state"])
             scheduler.load_state_dict(checkpoint["scheduler_state"])
             cur_itrs = checkpoint["cur_itrs"]
+            cur_epochs = checkpoint["cur_epochs"]
             best_score = checkpoint['best_score']
             print("Training state restored from %s" % opts.ckpt)
         print("Model restored from %s" % opts.ckpt)
@@ -299,72 +322,155 @@ def main():
 
     if opts.test_only:
         model.eval()
-        val_score, ret_samples = validate(
-            opts=opts, model=model, loader=val_loader, device=device, metrics=metrics, ret_samples_ids=vis_sample_id)
+        val_score, ret_samples = validate(opts=opts, 
+                                          model=model, 
+                                          loader=val_loader, 
+                                          device=device, 
+                                          metrics=metrics, 
+                                          ret_samples_ids=vis_sample_id)
+        output = [f"Overall Acc: {val_score['Overall Acc']}",
+                  f"Mean Acc: {val_score['Mean Acc']}",
+                  f"FreqW Acc: {val_score['FreqW Acc']}",
+                  f"Mean IoU: {val_score['Mean IoU']}",
+                  f"Class IoU: {val_score['Class IoU']}"]
+        with open(f'./logs/test/{opts.model_name}_logs.txt', 'w') as f:
+            f.writelines('\n'.join(output))
+        f.close()
         print(metrics.to_str(val_score))
         return
 
     interval_loss = 0
     while True:  # cur_itrs < opts.total_itrs:
-        # =====  Train  =====
-        model.train()
-        cur_epochs += 1
-        for (images, labels) in train_loader:
-            cur_itrs += 1
+        try:
+            # =====  Train  =====
+            model.train()
+            
+            # A: mail begin
+            if cur_epochs%10 == 0 and first_val:
+                local_time = get_time()         # A: for email
+                mail_reply = f"Training: round {opts.training_round}\nEpoch {cur_epochs}/{opts.total_epochs}, iteration {cur_itrs} at {local_time}.\nLoss: {np_loss}\nOverall Acc: {val_score['Overall Acc']}\nMean Acc: {val_score['Mean Acc']}\nFreqW Acc: {val_score['FreqW Acc']}\nMean IoU: {val_score['Mean IoU']}\nClass IoU: {val_score['Class IoU']}"
+                for dest in get_mail_addresses():
+                    send_mail(server = mail_server["server_address"],
+                              port = mail_server["server_port"],
+                              user = mail_server["user"],
+                              password = mail_server["password"],
+                              to = dest,
+                              subject = opts.mail_subject,
+                              body = mail_reply)
+            # A: mail end  
 
-            images = images.to(device, dtype=torch.float32)
-            labels = labels.to(device, dtype=torch.long)
+            cur_epochs += 1
+            for (images, labels) in train_loader:
+                cur_itrs += 1
 
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+                images = images.to(device, dtype=torch.float32)
+                labels = labels.to(device, dtype=torch.long)
 
-            np_loss = loss.detach().cpu().numpy()
-            interval_loss += np_loss
-            if vis is not None:
-                vis.vis_scalar('Loss', cur_itrs, np_loss)
+                optimizer.zero_grad()
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
 
-            if (cur_itrs) % 10 == 0:
-                interval_loss = interval_loss / 10
-                print("Epoch %d, Itrs %d/%d, Loss=%f" %
-                      (cur_epochs, cur_itrs, opts.total_itrs, interval_loss))
-                interval_loss = 0.0
+                np_loss = loss.detach().cpu().numpy()
+                interval_loss += np_loss
+                if vis is not None:
+                    vis.vis_scalar('Loss', cur_itrs, np_loss)
 
-            if (cur_itrs) % opts.val_interval == 0:
-                save_ckpt('checkpoints/latest_%s_%s_os%d_%s.pth' %
-                          (opts.model, opts.dataset, opts.output_stride, opts.model_name))
-                print("validation...")
-                model.eval()
-                val_score, ret_samples = validate(
-                    opts=opts, model=model, loader=val_loader, device=device, metrics=metrics,
-                    ret_samples_ids=vis_sample_id)
-                print(metrics.to_str(val_score))
-                if val_score['Mean IoU'] > best_score:  # save best model
-                    best_score = val_score['Mean IoU']
-                    save_ckpt('checkpoints/best_%s_%s_os%d_%s.pth' %
+                if (cur_itrs) % 10 == 0:
+                    interval_loss = interval_loss / 10
+                    #print("Epoch %d, Itrs %d/%d, Loss=%f" %
+                    #      (cur_epochs, cur_itrs, opts.total_itrs, interval_loss))
+                    print("Epoch %d/%d, Itrs %d, Loss=%f" %
+                          (cur_epochs + 1, opts.total_epochs, cur_itrs, interval_loss))
+                    interval_loss = 0.0
+
+                if (cur_itrs) % opts.val_interval == 0:
+                    save_ckpt('checkpoints/latest_%s_%s_os%d_%s.pth' %
                               (opts.model, opts.dataset, opts.output_stride, opts.model_name))
+                    print("validation...")
+                    model.eval()
+                    val_score, ret_samples = validate(
+                        opts=opts, model=model, loader=val_loader, device=device, metrics=metrics,
+                        ret_samples_ids=vis_sample_id)
+                    first_val = True
+                    print(metrics.to_str(val_score))
+                    if val_score['Mean IoU'] > best_score:  # save best model
+                        best_score = val_score['Mean IoU']
+                        save_ckpt('checkpoints/best_%s_%s_os%d_%s.pth' %
+                                  (opts.model, opts.dataset, opts.output_stride, opts.model_name))  
+                    
+                    # A: added these to keep logs instead of using Visdom
+                    output = [f"Epoch: {cur_epochs}", 
+                              f"Iteration: {cur_itrs}", 
+                              f"Loss: {np_loss}",
+                              f"Overall Acc: {val_score['Overall Acc']}",
+                              f"Mean Acc: {val_score['Mean Acc']}",
+                              f"FreqW Acc: {val_score['FreqW Acc']}",
+                              f"Mean IoU: {val_score['Mean IoU']}",
+                              f"Class IoU: {val_score['Class IoU']}"]
+                    with open(f'./logs/{opts.model_name}_logs.txt', 'w') as f:
+                        f.writelines('\n'.join(output))
+                    f.close()
+                    if vis is not None:  # visualize validation score and samples
+                        vis.vis_scalar("[Val] Overall Acc", cur_itrs, val_score['Overall Acc'])
+                        vis.vis_scalar("[Val] Mean IoU", cur_itrs, val_score['Mean IoU'])
+                        vis.vis_table("[Val] Class IoU", val_score['Class IoU'])
 
-                if vis is not None:  # visualize validation score and samples
-                    vis.vis_scalar("[Val] Overall Acc", cur_itrs, val_score['Overall Acc'])
-                    vis.vis_scalar("[Val] Mean IoU", cur_itrs, val_score['Mean IoU'])
-                    vis.vis_table("[Val] Class IoU", val_score['Class IoU'])
-
-                    for k, (img, target, lbl) in enumerate(ret_samples):
-                        img = (denorm(img) * 255).astype(np.uint8)
-                        # A: this transpose is done because pytorch uses channel, height, width
-                        # https://github.com/isl-org/MiDaS/issues/79
-                        target = train_dst.decode_target(target).transpose(2, 0, 1).astype(np.uint8)
-                        lbl = train_dst.decode_target(lbl).transpose(2, 0, 1).astype(np.uint8)
-                        concat_img = np.concatenate((img, target, lbl), axis=2)  # concat along width
-                        vis.vis_image('Sample %d' % k, concat_img)
-                model.train()
-            scheduler.step()
-
-            if cur_itrs >= opts.total_itrs:
-                return
-
+                        for k, (img, target, lbl) in enumerate(ret_samples):
+                            img = (denorm(img) * 255).astype(np.uint8)
+                            # A: this transpose is done because pytorch uses channel, height, width
+                            # https://github.com/isl-org/MiDaS/issues/79
+                            target = train_dst.decode_target(target).transpose(2, 0, 1).astype(np.uint8)
+                            lbl = train_dst.decode_target(lbl).transpose(2, 0, 1).astype(np.uint8)
+                            concat_img = np.concatenate((img, target, lbl), axis=2)  # concat along width
+                            vis.vis_image('Sample %d' % k, concat_img)
+                    model.train()
+                scheduler.step()
+                    
+                if cur_epochs >= opts.total_epochs:
+                    save_ckpt('checkpoints/latest_%s_%s_os%d_%s.pth' %
+                              (opts.model, opts.dataset, opts.output_stride, opts.model_name))
+                    print("validation...")
+                    model.eval()
+                    val_score, ret_samples = validate(
+                        opts=opts, model=model, loader=val_loader, device=device, metrics=metrics,
+                        ret_samples_ids=vis_sample_id)
+                    print(metrics.to_str(val_score))
+                    if val_score['Mean IoU'] > best_score:  # save best model
+                        best_score = val_score['Mean IoU']
+                        save_ckpt('checkpoints/best_%s_%s_os%d_%s.pth' %
+                                  (opts.model, opts.dataset, opts.output_stride, opts.model_name))
+                    # A: mail begin
+                    local_time = get_time()         # A: for email
+                    mail_reply = f"Training: round {opts.training_round}\nEpoch {cur_epochs}/{opts.total_epochs}, iteration {cur_itrs} at {local_time}.\nLoss: {np_loss}\nOverall Acc: {val_score['Overall Acc']}\nMean Acc: {val_score['Mean Acc']}\nFreqW Acc: {val_score['FreqW Acc']}\nMean IoU: {val_score['Mean IoU']}\nClass IoU: {val_score['Class IoU']}"
+                    for dest in get_mail_addresses():
+                        send_mail(server = mail_server["server_address"],
+                                  port = mail_server["server_port"],
+                                  user = mail_server["user"],
+                                  password = mail_server["password"],
+                                  to = dest,
+                                  subject = opts.mail_subject,
+                                  body = mail_reply)
+                    # A: mail end 
+                    # A: added these to keep logs instead of using Visdom
+                    output = [f"Epoch: {cur_epochs}", 
+                              f"Iteration: {cur_itrs}", 
+                              f"Loss: {np_loss}",
+                              f"Overall Acc: {val_score['Overall Acc']}",
+                              f"Mean Acc: {val_score['Mean Acc']}",
+                              f"FreqW Acc: {val_score['FreqW Acc']}",
+                              f"Mean IoU: {val_score['Mean IoU']}",
+                              f"Class IoU: {val_score['Class IoU']}"]
+                    with open(f'./logs/{opts.model_name}_logs.txt', 'w') as f:
+                        f.writelines('\n'.join(output))
+                    f.close()
+                    
+                    sys.exit(0)
+                    return
+        except Exception as e:
+            print(traceback.format_exc())
+            sys.exit(1)
 
 if __name__ == '__main__':
     main()
